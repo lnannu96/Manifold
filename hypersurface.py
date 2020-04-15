@@ -9,13 +9,14 @@ class Hypersurface(Manifold):
     def __init__(self, coordinates, function, dimensions, n_points):
         super().__init__(dimensions) # Add one more variable for dimension
         self.function = function
-<<<<<<< Updated upstream
-        self.coordinates = coordinates
+        self.coordinates = np.array(coordinates)
+        self.conjcoords = sp.conjugate(self.coordinates)
         self.n_points = n_points
         self.__zpairs = self.__generate_random_pair()
         self.points = self.__solve_points()
         self.patches = []
         self.__autopatch()
+        self.sections,self.num_sec=self.__sections()
         self.holo_volume_form = self.__get_holvolform() 
     #def HolVolForm(F, Z, j)
 
@@ -172,8 +173,8 @@ class Hypersurface(Manifold):
         poly = sp.series(GenSec,t,n=self.dimensions+1).coeff(t**(self.dimensions))
         sections = []
         while poly!=0:
-            sections.append(LT(poly))
-            poly = poly - LT(poly)
+            sections.append(sp.LT(poly))
+            poly = poly - sp.LT(poly)
         return (np.array(sections),len(sections))
 
     def KahlerPotential(self):
