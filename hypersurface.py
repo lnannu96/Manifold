@@ -24,6 +24,17 @@ class Hypersurface(Manifold):
         self.coordinates = np.array(coordinates)
         self.conjcoords = sp.conjugate(self.coordinates)
         self.norm_coordinate = norm_coordinate
+<<<<<<< Updated upstream
+=======
+        # The symbolic coordinate is self.coordiante[self.norm_coordiante]
+        self.max_grad_coordinate = max_grad_coordinate
+        # Range 0 to n-2, this works only on subpatches where max grad is calculated
+        # Symbolically self.affin_coordinate[self.max_grad_coordinate]
+        if norm_coordinate is not None:
+            self.affine_coordinates = np.delete(self.coordinates, norm_coordinate)
+        else:
+            self.affine_coordinates = self.coordinates
+>>>>>>> Stashed changes
         self.patches = []
         if points is None:
             self.points = self.__solve_points(n_pairs)
@@ -92,6 +103,7 @@ class Hypersurface(Manifold):
 
     def __solve_points(self):
         points = []
+<<<<<<< Updated upstream
         for zpair in self.__zpairs:
             a = sp.symbols('a')
             line = [zpair[0][i]+(a*zpair[1][i]) for i in range(self.dimensions)]
@@ -101,6 +113,20 @@ class Hypersurface(Manifold):
             #function_lambda = sp.lambdify(a, function_eval, ["scipy", "numpy"])
             #a_solved = fsolve(function_lambda, 1)
             a_solved = sp.polys.polytools.nroots(function_eval)
+=======
+        zpairs = self.__generate_random_pair(n_pairs)
+        f_evaluatable = sp.lamdify(self.coordinates,self.function,"numpy")
+        a = sp.symbols('a')
+        for zpair in zpairs:
+            #a = sp.symbols('a')
+            line = [zpair[0][i]+(a*zpair[1][i]) for i in range(self.dimensions)]
+            #function_eval = self.function.subs([(self.coordinates[i], line[i])
+            #function_eval = self.function.subs([(self.coordinates[i], line[i])
+                                                #for i in range(self.dimensions)])
+            # This solver uses mpmath package, which should be pretty accurate
+            #a_solved = sp.polys.polytools.nroots(function_eval)
+            a_solved = sp.polys.polytools.nroots(f_evaluatable(*(line)))
+>>>>>>> Stashed changes
             #a_rational = sp.solvers.solve(sp.Eq(sp.nsimplify(function_eval, rational=True)),a)
             # print("Solution for a_lambda:", a_poly)
             # a_solved = sp.solvers.solve(sp.Eq(sp.expand(function_eval)),a)
@@ -170,12 +196,57 @@ class Hypersurface(Manifold):
      def __sections(self):
         t = sp.symbols('t')
         GenSec = sp.prod(1/(1-(t*zz)) for zz in self.coordinates)
+<<<<<<< Updated upstream
         poly = sp.series(GenSec,t,n=self.dimensions+1).coeff(t**(self.dimensions))
         sections = []
         while poly!=0:
             sections.append(sp.LT(poly))
             poly = poly - sp.LT(poly)
         return (np.array(sections),len(sections))
+=======
+        poly = sp.series(GenSec, t, n=max(self.dimensions+1,k+1)).coeff(t**k)
+        while poly!=0:
+            sections.append(sp.LT(poly))
+            poly = poly - sp.LT(poly)
+        n_sections = len(sections)
+        sections = np.array(sections)
+        return sections, n_sections
+    # just one potential
+    def kahler_potential(self, h_matrix=None, k=1):
+        #need to generalize this for when we start implementing networks
+        sections, n_sec = self.get_sections(k)
+        if h_matrix is None:
+            h_matrix = sp.MatrixSymbol('H', n_sec, n_sec)
+        zbar_H_z = np.matmul(sp.conjugate(sections),
+                             np.matmul(h_matrix, sections))
+        if self.norm_coordinate is not None:
+            zbar_H_z = zbar_H_z.subs(self.coordinates[self.norm_coordinate], 1)
+        kahler_potential = sp.log(zbar_H_z)
+        return kahler_potential
+
+    def kahler_metric(self, h_matrix=None, k=1):
+        pot = self.kahler_potential(h_matrix, k)
+        metric = []
+        #i holomorphc, j anti-hol
+        for coord_i in self.affine_coordinates:
+            a_holo_der = []
+            for coord_j in self.affine_coordinates:
+                a_holo_der.append(diff_conjugate(pot, coord_j))
+            metric.append([diff(ah, coord_i) for ah in a_holo_der])
+        metric = sp.Matrix(metric)
+        return metric
+
+    def get_restriction(self, ignored_coord=None):
+        if ignored_coord is None:
+           ignored_coord = self.max_grad_coordinate
+        ignored_coordinate = self.affine_coordinates[ignored_coord]
+        local_coordinates = sp.Matrix(self.affine_coordinates).subs(ignored_coordinate,self.function)                                                                   self.function)
+        affine_coordinates = sp.Matrix(self.affine_coordinates)
+        restriction = local_coordinates.jacobian(affine_coordinates).inv()
+        restriction.col_del(ignored_coord)
+        return restriction
+        # Todo: Add try except in this function 
+>>>>>>> Stashed changes
 
     def KahlerPotential(self):
         ns = self.num_sec
