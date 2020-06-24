@@ -2,31 +2,34 @@ import numpy as np
 import sympy as sp
 from manifold import *
 from patches import *
+from mpmath import *
+import time
+from loky import get_reusable_executor
+from multiprocessing import Pool
+"""
+
+import numpy as np
+import sympy as sp
+from manifold import *
+from mpmath import *
+from multiprocessing import Pool
+import time
+from loky import get_reusable_executor
+from sympy.utilities.lambdify import lambdastr
+"""
 
 # In manifold and type
 class Hypersurface(Manifold):
 
-    def __init__(self, coordinates, function, dimensions, n_points):
-        super().__init__(dimensions) # Add one more variable for dimension
+    def __init__(self, coordinates, function,
+                 n_pairs=0, points=None, norm_coordinate=None,
+                 max_grad_coordinate=None):
+        #super().__init__(dimensions) # Add one more variable for dimension
         self.function = function
         self.coordinates = np.array(coordinates)
-        self.conjcoords = sp.conjugate(self.coordinates)
-        self.n_points = n_points
-        self.__zpairs = self.__generate_random_pair()
-        self.points = self.__solve_points()
-        self.patches = []
-        self.__autopatch()
-        self.sections,self.num_sec=self.__sections()
-        self.holo_volume_form = self.__get_holvolform() 
-    #def HolVolForm(F, Z, j)
-
-=======
-        self.coordinates = np.array(coordinates)
-        self.conjcoords = sp.conjugate(self.coordinates)
+        self.dimensions = len(self.coordinates)
         self.norm_coordinate = norm_coordinate
-<<<<<<< Updated upstream
-=======
-        # The symbolic coordinate is self.coordiante[self.norm_coordiante]
+        # The symbolic coordiante is self.coordiante[self.norm_coordiante]
         self.max_grad_coordinate = max_grad_coordinate
         # Range 0 to n-2, this works only on subpatches where max grad is calculated
         # Symbolically self.affin_coordinate[self.max_grad_coordinate]
@@ -34,15 +37,15 @@ class Hypersurface(Manifold):
             self.affine_coordinates = np.delete(self.coordinates, norm_coordinate)
         else:
             self.affine_coordinates = self.coordinates
->>>>>>> Stashed changes
         self.patches = []
+        self.indices = []
         if points is None:
             self.points = self.__solve_points(n_pairs)
             self.__autopatch()
         else:
             self.points = points
         self.n_points = len(self.points)
-        self.sections,self.num_sec = self.__sections()
+        self.n_patches = len(self.patches)
         self.initialize_basic_properties()
     
     def initialize_basic_properties(self):
@@ -50,21 +53,19 @@ class Hypersurface(Manifold):
         # the projective patches after subpatches are created. Then this function will
         # be reinvoked.
         self.grad = self.get_grad()
-        self.holo_volume_form = self.get_holvolform()
+        self.hol_n_form = self.get_hol_n_form()
+        self.omega_omegabar = self.get_omega_omegabar()
+        #self.sections, self.n_sections = self.get_sections(self.dimensions)
+        #self.FS_Metric = self.get_FS()
         #self.transition_function = self.__get_transition_function()
->>>>>>> Stashed changes
 
     def reset_patchwork(self):
-        #self.patches = [None]*n_patches
         self.patches = []
 
-    def set_patch(self, points_on_patch, norm_coordinate):
-        #patch.append(point)
-        #for points in points_on_patch:
-        #    new_patch = Patches(self.coordinates, self.function, self.dimensions, points)
-        #    self.patches.append(new_patch)
-        new_patch = Patches(self.coordinates, self.function, self.dimensions,
-                            points_on_patch, norm_coordinate)
+    def set_patch(self, points_on_patch, norm_coord=None, max_grad_coord=None):
+        new_patch = Hypersurface(self.coordinates, self.function, 
+                                 points=points_on_patch, norm_coordinate=norm_coord,
+                                 max_grad_coordinate=max_grad_coord)
         self.patches.append(new_patch)
         
     def list_patches(self):
@@ -74,106 +75,128 @@ class Hypersurface(Manifold):
             print("Points in patch", i, ":", len(patch.points))
             i = i + 1
 
-    def normalize_point(self, point, coordinate):
-        for i in range(len(point)):
-            point[i] = sp.simplify(point[i] / point[coordinate])
-        return point
+    def normalize_point(self, point, norm_coordinate):
+        point_normalized = []
+        for coordinate in point:
+            norm_coefficient = point[norm_coordinate]
+            coordinate_normalized = coordinate / norm_coefficient
+            point_normalized.append(coordinate_normalized)
+        return point_normalized
 
     def print_all_points(self):
         print("All points on this hypersurface:")
         print(self.points)
 
-    # def eval_holvolform(self):
-    #     holvolform = []
-    #     for i in range(len(self.patches)):
-    #         holvolform.append(self.patches[i].eval_holvolform())
-    #     return holvolform 
+    def eval(self, expr, point):
+        f = sp.lambdify(self.coordinates, expr)
+        expr_evaluated = f(*point)
+        return expr_evaluated
+
+    def eval_all(self, expr_name):
+        #expr_array = np.array(getattr(self, expr_name))
+        expr_array = np.array(expr_name)
+        expr_array_evaluated = []
+        if self.patches == []:
+            for point in self.points:
+                expr_evaluated = []
+                for expr in np.nditer(expr_array, flags=['refs_ok']):
+                    expr = expr.item(0)
+                    expr = expr.subs([(self.coordinates[i], point[i])
+                                      for i in range(self.dimensions)])
+                    expr_evaluated.append(sp.simplify(expr))
+                expr_array_evaluated.append(expr_evaluated)
+        else:
+            for patch in self.patches:
+                expr_array_evaluated.append(patch.eval_all(expr_name))
+        return expr_array_evaluated
+
+    def sum_on_patch(self, lambda_expr):
+        summation = 0
+        points = np.array(self.points)
+        if self.patches == []:
+            f = sp.lambdify([self.coordinates], lambda_expr(self), "numpy")
+            for point in self.points:
+                 value = f(point)
+                 summation += value
+                 #if np.absolute(value) < 5 and np.absolute(value) > -5:
+                 #    summation += value
+                 #else:
+                 #    print("Possible division of a small number:", value)
+        else:
+            with get_reusable_executor() as executor:
+                summation = sum(list(executor.map(lambda x: x.sum_on_patch(lambda_expr), self.patches)))
+        return summation
+
+    def integrate(self, f, holomorphic=False):
+        # f is a lambda function given by the user
+        # holomorphic=True means integrating over Omega_Omegabar
+        if holomorphic == True:
+            # m is the mass formular
+            m = lambda x: x.omega_omegabar / x.get_FS_volume_form(k=1)
+            # Define a new f with an extra argument user_f and immediatly pass f as
+            # the default value, so that f can be updated as f(x) * m(x)
+            f = lambda x, user_f=f: user_f(x) * m(x)
+            norm_factor = 1 / self.sum_on_patch(m)
+        else:
+            norm_factor = 1 / self.n_points
+
+        summation = self.sum_on_patch(f)
+        integration = summation * norm_factor
+        return integration
+ 
 
 
     # Private:
 
-    def __generate_random_pair(self):
+    def __generate_random_pair(self, n_pairs):
         z_random_pair = []
-        for i in range(self.n_points):
+        for i in range(n_pairs):
             zv = []
             for j in range(2):
-                zv.append([complex(c[0],c[1]) for c in np.random.normal(0.0,1.0,(self.dimensions,2))])
+                zv.append([complex(c[0],c[1]) for c in np.random.normal(0.0, 1.0, (self.dimensions, 2))])
             z_random_pair.append(zv)
-        return(z_random_pair)
+        return z_random_pair
 
-    def __solve_points(self):
+    @staticmethod
+    def solve_poly(zpair, coeff):
+        # For each zpair there are d solutions, where d is the dimensions
+        points_d = []
+        c_solved = polyroots(coeff) 
+        for pram_c in c_solved:
+            points_d.append([complex(pram_c * a + b)
+                             for (a, b) in zip(zpair[0], zpair[1])])
+        return points_d
+
+    def __solve_points(self, n_pairs):
         points = []
-<<<<<<< Updated upstream
-        for zpair in self.__zpairs:
-            a = sp.symbols('a')
-            line = [zpair[0][i]+(a*zpair[1][i]) for i in range(self.dimensions)]
-            function_eval = self.function.subs([(self.coordinates[i], line[i])
-                                                  for i in range(self.dimensions)])
-            #print(sp.expand(function_eval))
-            #function_lambda = sp.lambdify(a, function_eval, ["scipy", "numpy"])
-            #a_solved = fsolve(function_lambda, 1)
-            a_solved = sp.polys.polytools.nroots(function_eval)
-=======
         zpairs = self.__generate_random_pair(n_pairs)
-        f_evaluatable = sp.lamdify(self.coordinates,self.function,"numpy")
-        a = sp.symbols('a')
-        for zpair in zpairs:
-            #a = sp.symbols('a')
-            line = [zpair[0][i]+(a*zpair[1][i]) for i in range(self.dimensions)]
-            #function_eval = self.function.subs([(self.coordinates[i], line[i])
-            #function_eval = self.function.subs([(self.coordinates[i], line[i])
-                                                #for i in range(self.dimensions)])
-            # This solver uses mpmath package, which should be pretty accurate
-            #a_solved = sp.polys.polytools.nroots(function_eval)
-            a_solved = sp.polys.polytools.nroots(f_evaluatable(*(line)))
->>>>>>> Stashed changes
-            #a_rational = sp.solvers.solve(sp.Eq(sp.nsimplify(function_eval, rational=True)),a)
-            # print("Solution for a_lambda:", a_poly)
-            # a_solved = sp.solvers.solve(sp.Eq(sp.expand(function_eval)),a)
-            for pram_a in a_solved:
-                points.append([zpair[0][i]+(pram_a*zpair[1][i])
-                               for i in range(self.dimensions)])
-        return(points)
-
-    # def __autopatch(self):
-    #    self.reset_patchwork()
-    #    #self.reset_patchwork(self.dimensions)
-    #    #for i in range(self.dimensions):
-    #    #     self.patches[i] = []
-    #     points_on_patch = [[] for i in range(self.dimensions)]
-    #     for point in self.points:
-    #         norms = np.absolute(point)
-    #         for i in range(self.dimensions):
-    #             if norms[i] == max(norms):
-    #                 point_normalized = self.normalize_point(point, i)
-    #                 points_on_patch[i].append(point_normalized) 
-    #     self.set_patch(points_on_patch)
-    #                #self.set_patch(point, self.patches[i])
-    #                 # remake patch here
-
+        coeff_a = [sp.symbols('a'+str(i)) for i in range(self.dimensions)]
+        coeff_b = [sp.symbols('b'+str(i)) for i in range(self.dimensions)]
+        c = sp.symbols('c')
+        coeff_zip = zip(coeff_a, coeff_b)
+        line = [c*a+b for (a, b) in coeff_zip]
+        function_eval = self.function.subs([(self.coordinates[i], line[i])
+                                            for i in range(self.dimensions)])
+        poly = sp.Poly(function_eval, c)
+        coeff_poly = poly.coeffs()
+        get_coeff = sp.lambdify([coeff_a, coeff_b], coeff_poly)
+        # Multiprocessing. Then append the points to the same list in the main process
+        with Pool() as pool:
+            for points_d in pool.starmap(Hypersurface.solve_poly,
+                                         zip(zpairs, [get_coeff(zpair[0], zpair[1])
+                                                      for zpair in zpairs])):
+                points.extend(points_d)
+        return points
 
     def __autopatch(self):
         self.reset_patchwork()
-        for i in range(self.dimensions):
-            points_on_patch = []
-            for point in self.points:
-                norms = np.absolute(point)
+        # projective patches
+        points_on_patch = [[] for i in range(self.dimensions)]
+        for point in self.points:
+            norms = np.absolute(point)
+            for i in range(self.dimensions):
                 if norms[i] == max(norms):
                     point_normalized = self.normalize_point(point, i)
-<<<<<<< Updated upstream
-                    points_on_patch.append(point_normalized)
-            self.set_patch(points_on_patch, i)
-
-    def __get_holvolform(self):
-        holvolform = []
-        for i in range(len(self.patches)):
-            holvolform.append(self.patches[i].holo_volume_form)
-        return holvolform
-    #Add class section
-    #self. expr = sympy
-    #def pt set
-    #contains derivatives etc
-=======
                     points_on_patch[i].append(point_normalized)
                     continue
         for i in range(self.dimensions):
@@ -181,42 +204,80 @@ class Hypersurface(Manifold):
         # Subpatches on each patch
         for patch in self.patches:
             points_on_patch = [[] for i in range(self.dimensions-1)]
+            grad_eval = sp.lambdify(self.coordinates, patch.grad)
             for point in patch.points:
-                grad = patch.eval(patch.grad, point)
+                grad = grad_eval(*point)
                 grad_norm = np.absolute(grad)
                 for i in range(self.dimensions-1):
                     if grad_norm[i] == max(grad_norm):
                         points_on_patch[i].append(point)
+                        patch.indices.append(i)
                         continue
             for i in range(self.dimensions-1):
-                patch.set_patch(points_on_patch[i], patch.norm_coordinate)
+                patch.set_patch(points_on_patch[i], patch.norm_coordinate,
+                                max_grad_coord=i)
+            # Reinitialize the affine patches after generating subpatches
             patch.initialize_basic_properties()
 
+    def get_FS(self):
+        FS_metric = self.kahler_metric(np.identity(self.dimensions, dtype=int), k=1)
+        return FS_metric
 
-     def __sections(self):
+    def get_grad(self):
+        grad = []
+        if self.patches == []:
+            for coord in self.affine_coordinates:
+                grad_i = self.function.diff(coord)
+                grad.append(grad_i)
+        else:
+            for patch in self.patches:
+                grad.append(patch.grad)
+        return grad
+
+
+    def get_hol_n_form(self):
+        hol_n_form = []
+        if self.patches == [] and self.max_grad_coordinate is not None:
+        # The later condition is neccessary due to the initialization
+            hol_n_form = 1 / self.grad[self.max_grad_coordinate]
+        else:
+            for patch in self.patches:
+                hol_n_form.append(patch.hol_n_form)
+        return hol_n_form
+
+    def get_omega_omegabar(self):
+        omega_omegabar = []
+        if self.patches == [] and self.max_grad_coordinate is not None:
+            hol_n_form = self.hol_n_form
+            omega_omegabar = hol_n_form * sp.conjugate(hol_n_form)
+        else:
+            for patch in self.patches:
+                omega_omegabar.append(patch.omega_omegabar)
+        return omega_omegabar
+
+    def get_sections(self, k):
+        sections = []
         t = sp.symbols('t')
         GenSec = sp.prod(1/(1-(t*zz)) for zz in self.coordinates)
-<<<<<<< Updated upstream
-        poly = sp.series(GenSec,t,n=self.dimensions+1).coeff(t**(self.dimensions))
-        sections = []
-        while poly!=0:
-            sections.append(sp.LT(poly))
-            poly = poly - sp.LT(poly)
-        return (np.array(sections),len(sections))
-=======
-        poly = sp.series(GenSec, t, n=max(self.dimensions+1,k+1)).coeff(t**k)
+        poly = sp.series(GenSec, t, n=k+1).coeff(t**k)
         while poly!=0:
             sections.append(sp.LT(poly))
             poly = poly - sp.LT(poly)
         n_sections = len(sections)
         sections = np.array(sections)
         return sections, n_sections
-    # just one potential
+
     def kahler_potential(self, h_matrix=None, k=1):
-        #need to generalize this for when we start implementing networks
         sections, n_sec = self.get_sections(k)
         if h_matrix is None:
-            h_matrix = sp.MatrixSymbol('H', n_sec, n_sec)
+            h_matrix = np.identity(n_sec)
+        # Check if h_matrix is a string
+        elif isinstance(h_matrix, str):
+            if h_matrix == "identity":
+                h_matrix = np.identity(n_sec)
+            elif h_matrix == "symbolic":
+                h_matrix = sp.MatrixSymbol('H', n_sec, n_sec)
+        
         zbar_H_z = np.matmul(sp.conjugate(sections),
                              np.matmul(h_matrix, sections))
         if self.norm_coordinate is not None:
@@ -224,36 +285,45 @@ class Hypersurface(Manifold):
         kahler_potential = sp.log(zbar_H_z)
         return kahler_potential
 
-    def kahler_metric(self, h_matrix=None, k=1):
-        pot = self.kahler_potential(h_matrix, k)
-        metric = []
-        #i holomorphc, j anti-hol
-        for coord_i in self.affine_coordinates:
-            a_holo_der = []
-            for coord_j in self.affine_coordinates:
-                a_holo_der.append(diff_conjugate(pot, coord_j))
-            metric.append([diff(ah, coord_i) for ah in a_holo_der])
-        metric = sp.Matrix(metric)
+    def kahler_metric(self, h_matrix=None, k=1, point=None):
+        if point is None:
+            pot = self.kahler_potential(h_matrix, k)
+            metric = []
+            #i holomorphc, j anti-hol
+            for coord_i in self.affine_coordinates:
+                a_holo_der = []
+                for coord_j in self.affine_coordinates:
+                    a_holo_der.append(diff_conjugate(pot, coord_j))
+                metric.append([diff(ah, coord_i) for ah in a_holo_der])
+            metric = sp.Matrix(metric)
         return metric
 
     def get_restriction(self, ignored_coord=None):
         if ignored_coord is None:
-           ignored_coord = self.max_grad_coordinate
+            ignored_coord = self.max_grad_coordinate
         ignored_coordinate = self.affine_coordinates[ignored_coord]
-        local_coordinates = sp.Matrix(self.affine_coordinates).subs(ignored_coordinate,self.function)                                                                   self.function)
+        local_coordinates = sp.Matrix(self.affine_coordinates).subs(ignored_coordinate,self.function)
         affine_coordinates = sp.Matrix(self.affine_coordinates)
         restriction = local_coordinates.jacobian(affine_coordinates).inv()
         restriction.col_del(ignored_coord)
         return restriction
         # Todo: Add try except in this function 
->>>>>>> Stashed changes
 
-    def KahlerPotential(self):
-        ns = self.num_sec
-        H = sp.MatrixSymbol('H',ns,ns)
-        zbar_H_z = np.matmul(sp.conjugate(self.sections),np.matmul(H,self.sections))
-        return sp.log(zbar_H_z)
+    def get_FS_volume_form(self, h_matrix=None, k=1):
+        kahler_metric = self.kahler_metric(h_matrix, k)
+        restriction = self.get_restriction()
+        FS_volume_form = restriction.T.conjugate() * kahler_metric * restriction
+        FS_volume_form = FS_volume_form.det()
+        return FS_volume_form
 
-    def KahlerMetric(self):
-        pot = self.KahlerPotential()
-        # need to establish diff wrt conjugate
+def diff_conjugate(expr, coordinate):
+    coord_bar = sp.symbols('coord_bar')
+    expr_diff = expr.subs(sp.conjugate(coordinate), coord_bar).diff(coord_bar)
+    expr_diff = expr_diff.subs(coord_bar, sp.conjugate(coordinate))
+    return expr_diff
+
+def diff(expr, coordinate):
+    coord_bar = sp.symbols('coord_bar')
+    expr_diff = expr.subs(sp.conjugate(coordinate), coord_bar).diff(coordinate)
+    expr_diff = expr_diff.subs(coord_bar, sp.conjugate(coordinate))
+    return expr_diff
